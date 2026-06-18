@@ -77,3 +77,6 @@ Testing/
 # Large datasets
 data/*.csv
 data/*.parquet
+
+#docs
+docs/

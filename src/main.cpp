@@ -4,36 +4,84 @@
 #include "../include/scanner.h"
 #include "../include/filter.h"
 #include "../include/aggregator.h"
+#include "loader.cpp"
 #include <iostream>
-#include <string>
-#include "../src/loader.cpp"
 #include <chrono>
+#include <thread>
+#include <vector>
 
 using namespace std;
 
 int main() {
-    Table t(3);
+    cout << "Loading taxi data..." << endl;
+    TaxiData data = loadTaxiData("../data/taxi_slim.csv");
+    cout << "Loaded." << endl;
 
-    // high repetition → RLE
-    auto col1 = make_unique<Column<int>>(12, "status");
-    int status[] = {1,1,1,1,2,2,2,2,3,3,3,3};
-    for (int i = 0; i < 12; i++) col1->data[i] = status[i];
+    // ── single-threaded baseline ──
+    auto start1 = chrono::high_resolution_clock::now();
 
-    // low cardinality → dict
-    auto col2 = make_unique<Column<int>>(10, "payment_type");
-    int payments[] = {1,1,2,1,2,2,1,1,2,1};
-    for (int i = 0; i < 10; i++) col2->data[i] = payments[i];
+    Scanner<float> dist_scanner(data.trip_distance, 4096);
+    Scanner<float> fare_scanner(data.fare_amount, 4096);
+    AggResult<float> total;
+    total.sum = 0; total.count = 0;
 
-    // all unique → raw
-    auto col3 = make_unique<Column<int>>(5, "ids");
-    for (int i = 0; i < 5; i++) col3->data[i] = i + 1;
+    while (dist_scanner.hasNextBatch()) {
+        auto [dist_batch, dist_size] = dist_scanner.nextBatch();
+        auto [fare_batch, fare_size] = fare_scanner.nextBatch();
+        auto indices = Filter::filter<float>(dist_batch, dist_size, [](float x) { return x > 5.0f; });
+        auto result = Aggregator::aggregate<float>(fare_batch, fare_size, &indices);
+        total.sum += result.sum;
+        total.count += result.count;
+    }
+    total.avg = total.count > 0 ? (double)total.sum / total.count : 0.0;
 
-    t.addColumn(move(col1));
-    t.addColumn(move(col2));
-    t.addColumn(move(col3));
+    auto end1 = chrono::high_resolution_clock::now();
+    auto ms1 = chrono::duration_cast<chrono::milliseconds>(end1 - start1).count();
 
-    t.save("test.bin");
-    cout << "status encoding:       " << (int)t.columns[0]->chooseEncoding() << endl;
-    cout << "payment_type encoding: " << (int)t.columns[1]->chooseEncoding() << endl;
-    cout << "ids encoding:          " << (int)t.columns[2]->chooseEncoding() << endl;
+    cout << "Single-threaded: SUM=" << total.sum << " COUNT=" << total.count
+         << " AVG=" << total.avg << " TIME=" << ms1 << "ms" << endl;
+
+    // ── multi-threaded version ──
+    int num_threads = 4;
+    auto start2 = chrono::high_resolution_clock::now();
+
+    vector<thread> threads;
+    vector<AggResult<float>> partials(num_threads);
+    size_t total_size = data.trip_distance.getSize();
+    size_t chunk_size = total_size / num_threads;
+
+    for (int t = 0; t < num_threads; t++) {
+        size_t start = t * chunk_size;
+        size_t end = (t == num_threads - 1) ? total_size : (t + 1) * chunk_size;
+        threads.emplace_back([&data, &partials, start, end, t](){
+            AggResult<float> partial;
+            partial.sum = 0; partial.count = 0;
+            for (auto i = start; i < end; i++) {
+                if (data.trip_distance.data[i] > 5.0f) {
+                    partial.sum += data.fare_amount.data[i];
+                    partial.count++;
+                }
+            }
+            partials[t] = partial;
+        });
+
+    }
+
+    for (auto& th : threads) th.join();
+
+    AggResult<float> total2;
+    total2.sum = 0; total2.count = 0;
+    for (auto& p : partials) {
+        total2.sum += p.sum;
+        total2.count += p.count;
+    }
+    total2.avg = total2.count > 0 ? (double)total2.sum / total2.count : 0.0;
+
+    auto end2 = chrono::high_resolution_clock::now();
+    auto ms2 = chrono::duration_cast<chrono::milliseconds>(end2 - start2).count();
+
+    cout << "Multi-threaded:  SUM=" << total2.sum << " COUNT=" << total2.count
+         << " AVG=" << total2.avg << " TIME=" << ms2 << "ms" << endl;
+
+    return 0;
 }

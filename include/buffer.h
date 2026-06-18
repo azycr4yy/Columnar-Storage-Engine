@@ -7,6 +7,8 @@
 #include <stdint.h>
 #include <chrono>
 #include <stdexcept>
+#include <fstream>
+#include <string.h>
 #include <print>
 
 static constexpr size_t PAGE_SIZE = 4096;
@@ -26,6 +28,7 @@ struct Frame{
 
 class BufferManager{
     private:
+    std::string m_filename;
     uint64_t m_getTime(){
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::high_resolution_clock::now().time_since_epoch()).count();
@@ -53,7 +56,10 @@ class BufferManager{
         }
         int frame_idx = page_table[page_id];
         if(frames[frame_idx].is_dirty){
-            //save to disk before flushing
+            std::ofstream file(m_filename,std::ios::binary | std::ios::in | std::ios::out);
+            file.seekp(page_id * PAGE_SIZE);
+            file.write(reinterpret_cast<const char*>(frames[frame_idx].page->data),PAGE_SIZE);
+            frames[frame_idx].is_dirty = false;
         }
         frames[frame_idx].is_dirty = false;
         }
@@ -76,6 +82,10 @@ class BufferManager{
         }
         if (lru_index == -1){
             throw std::runtime_error("No free frames");
+        }
+        if (frames[lru_index].is_dirty){
+            int evicted_page_id = frames[lru_index].page->page_id;
+            flush(evicted_page_id);
         }
         page_table.erase(frames[lru_index].page->page_id);
         delete frames[lru_index].page;

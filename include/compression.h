@@ -60,7 +60,8 @@ namespace Compression {
         return result;
     }
     template<typename T>
-    uint8_t chooseEncoding(const Column<T>& col) {
+    uint8_t chooseEncoding(const Column<T>& col) 
+    {
         std::unordered_set<T> unique(col.data.get(), col.data.get() + col.size);
         double cardinality = (double)unique.size() / col.size;
 
